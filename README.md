@@ -17,6 +17,9 @@ Commands:
 - `/columns` — lists the column names
 - `/clear` — forgets the currently loaded file
 
+If a search returns more matches than fit in one message, the reply includes
+**Next ▶️ / ◀️ Previous** buttons so you can page through all the results.
+
 ## Setup
 
 1. **Create a bot and get a token**
