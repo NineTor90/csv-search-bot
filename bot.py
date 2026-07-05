@@ -1,3 +1,4 @@
+import functools
 import io
 import logging
 import os
@@ -24,10 +25,34 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "20"))       # rows shown per search
 MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "20"))
 
+# Comma-separated Telegram user IDs allowed to use the bot, e.g. "123456789,987654321"
+# Leave unset/empty to allow everyone (not recommended for private data).
+_allowed_ids_raw = os.environ.get("ALLOWED_USER_IDS", "")
+ALLOWED_USER_IDS = {
+    int(uid.strip()) for uid in _allowed_ids_raw.split(",") if uid.strip()
+}
+
 CHAT_DF_KEY = "df"          # key used in chat_data to store the active DataFrame
 CHAT_FILENAME_KEY = "filename"
 
 
+def restricted(handler):
+    """Decorator that blocks the wrapped handler for anyone not in ALLOWED_USER_IDS."""
+
+    @functools.wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if ALLOWED_USER_IDS and (user is None or user.id not in ALLOWED_USER_IDS):
+            logger.warning("Blocked access from user_id=%s", user.id if user else "unknown")
+            if update.message:
+                await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+            return
+        return await handler(update, context)
+
+    return wrapper
+
+
+@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Hi! Send me a CSV file and I'll load it.\n"
@@ -45,6 +70,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await start(update, context)
 
 
+@restricted
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     df = context.chat_data.get(CHAT_DF_KEY)
     if df is None:
@@ -58,6 +84,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@restricted
 async def columns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     df = context.chat_data.get(CHAT_DF_KEY)
     if df is None:
@@ -67,12 +94,14 @@ async def columns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Columns:\n{cols}")
 
 
+@restricted
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.chat_data.pop(CHAT_DF_KEY, None)
     context.chat_data.pop(CHAT_FILENAME_KEY, None)
     await update.message.reply_text("Cleared. Send a new CSV whenever you're ready.")
 
 
+@restricted
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     doc = update.message.document
     filename = doc.file_name or ""
@@ -145,6 +174,7 @@ def _format_results(df: pd.DataFrame, max_rows: int) -> str:
     return text
 
 
+@restricted
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     raw_text = update.message.text.strip()
     if not raw_text:
@@ -162,31 +192,25 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    # Exact match first (case-insensitive, whole cell value) — this is what
-    # you want for IDs/codes like "A169372" so you get precisely that record.
-    exact_mask = df.apply(
-        lambda col: col.astype(str).str.lower() == query.lower()
+    # Find every row where any column contains the query (substring, case-insensitive).
+    substring_mask = df.apply(
+        lambda col: col.astype(str).str.contains(query, case=False, na=False, regex=False)
     ).any(axis=1)
-    results = df[exact_mask]
-    match_type = "exact"
-
-    # Fall back to substring search if no exact match anywhere.
-    if results.empty:
-        substring_mask = df.apply(
-            lambda col: col.astype(str).str.contains(
-                query, case=False, na=False, regex=False
-            )
-        ).any(axis=1)
-        results = df[substring_mask]
-        match_type = "partial"
+    results = df[substring_mask]
 
     if results.empty:
         await update.message.reply_text(f"No rows matched “{query}”.")
         return
 
-    label = "exact match" if match_type == "exact" else "partial match(es)"
-    reply = f"🔎 {len(results)} {label} for “{query}”:\n\n" + _format_results(
-        results, MAX_RESULTS
+    # Within those matches, put exact whole-cell matches first (e.g. a row
+    # where a column is exactly "Ahmed"), then the rest (e.g. "Ahmed Khan").
+    exact_mask = results.apply(
+        lambda col: col.astype(str).str.lower() == query.lower()
+    ).any(axis=1)
+    ordered_results = pd.concat([results[exact_mask], results[~exact_mask]])
+
+    reply = f"🔎 {len(ordered_results)} match(es) for “{query}”:\n\n" + _format_results(
+        ordered_results, MAX_RESULTS
     )
 
     # Telegram messages cap at 4096 chars; trim just in case.
