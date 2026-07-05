@@ -2,12 +2,14 @@ import functools
 import io
 import logging
 import os
+from typing import Optional
 
 import pandas as pd
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -34,6 +36,9 @@ ALLOWED_USER_IDS = {
 
 CHAT_DF_KEY = "df"          # key used in chat_data to store the active DataFrame
 CHAT_FILENAME_KEY = "filename"
+CHAT_LAST_RESULTS_KEY = "last_results"   # DataFrame of the most recent search's matches
+CHAT_LAST_QUERY_KEY = "last_query"       # the query string that produced last_results
+CHAT_LAST_OFFSET_KEY = "last_offset"     # how many rows already shown for that query
 
 
 def restricted(handler):
@@ -57,7 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Hi! Send me a CSV file and I'll load it.\n"
         "After that, just type any word or phrase and I'll search every column "
-        "for rows that match.\n\n"
+        "for rows that match. If there are a lot of matches, use the "
+        "Next ▶️ / ◀️ Previous buttons to page through them.\n\n"
         "Commands:\n"
         "/status — show which file is loaded\n"
         "/columns — list the columns in the loaded file\n"
@@ -163,15 +169,71 @@ def _format_row_block(row: pd.Series) -> str:
     return "\n".join(f"*{col}:* {row[col]}" for col in row.index)
 
 
-def _format_results(df: pd.DataFrame, max_rows: int) -> str:
+def _format_page(df: pd.DataFrame, query: str, page: int, page_size: int) -> str:
     total = len(df)
-    shown = df.head(max_rows)
+    start = page * page_size
+    shown = df.iloc[start: start + page_size]
+    total_pages = max(1, -(-total // page_size))  # ceiling division
 
     blocks = [_format_row_block(row) for _, row in shown.iterrows()]
-    text = "\n\n---\n\n".join(blocks)
-    if total > max_rows:
-        text += f"\n\n…and {total - max_rows} more row(s) not shown."
-    return text
+    header = f"🔎 {total} match(es) for “{query}” — page {page + 1}/{total_pages}\n\n"
+    return header + "\n\n---\n\n".join(blocks)
+
+
+def _pagination_keyboard(page: int, total_pages: int) -> Optional[InlineKeyboardMarkup]:
+    if total_pages <= 1:
+        return None
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"page:{page - 1}"))
+    if page < total_pages - 1:
+        buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page:{page + 1}"))
+    return InlineKeyboardMarkup([buttons]) if buttons else None
+
+
+async def _send_results_page(message_or_query, context: ContextTypes.DEFAULT_TYPE, page: int, edit: bool) -> None:
+    results = context.chat_data.get(CHAT_LAST_RESULTS_KEY)
+    query = context.chat_data.get(CHAT_LAST_QUERY_KEY, "")
+    total = len(results)
+    total_pages = max(1, -(-total // MAX_RESULTS))
+    page = max(0, min(page, total_pages - 1))
+
+    text = _format_page(results, query, page, MAX_RESULTS)
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n…(truncated)"
+    markup = _pagination_keyboard(page, total_pages)
+
+    context.chat_data[CHAT_LAST_OFFSET_KEY] = page
+
+    try:
+        if edit:
+            await message_or_query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await message_or_query.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    except Exception:  # noqa: BLE001 - e.g. a cell value breaks Markdown syntax
+        plain_text = text.replace("*", "")
+        if edit:
+            await message_or_query.edit_message_text(plain_text, reply_markup=markup)
+        else:
+            await message_or_query.reply_text(plain_text, reply_markup=markup)
+
+
+@restricted
+async def handle_page_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query_cb = update.callback_query
+    await query_cb.answer()  # stop the loading spinner on the button
+
+    results = context.chat_data.get(CHAT_LAST_RESULTS_KEY)
+    if results is None:
+        await query_cb.edit_message_text("This search has expired. Please search again.")
+        return
+
+    try:
+        page = int(query_cb.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        return
+
+    await _send_results_page(query_cb, context, page, edit=True)
 
 
 @restricted
@@ -209,19 +271,12 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ).any(axis=1)
     ordered_results = pd.concat([results[exact_mask], results[~exact_mask]])
 
-    reply = f"🔎 {len(ordered_results)} match(es) for “{query}”:\n\n" + _format_results(
-        ordered_results, MAX_RESULTS
-    )
+    # Save state so the Next/Previous buttons can page through this search.
+    context.chat_data[CHAT_LAST_RESULTS_KEY] = ordered_results
+    context.chat_data[CHAT_LAST_QUERY_KEY] = query
+    context.chat_data[CHAT_LAST_OFFSET_KEY] = 0
 
-    # Telegram messages cap at 4096 chars; trim just in case.
-    if len(reply) > 4000:
-        reply = reply[:4000] + "\n\n…(truncated)"
-
-    try:
-        await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
-    except Exception:  # noqa: BLE001 - e.g. a cell value breaks Markdown syntax
-        plain_reply = reply.replace("*", "")
-        await update.message.reply_text(plain_reply)
+    await _send_results_page(update.message, context, page=0, edit=False)
 
 
 def main() -> None:
@@ -237,6 +292,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("columns", columns))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CallbackQueryHandler(handle_page_button, pattern=r"^page:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 
