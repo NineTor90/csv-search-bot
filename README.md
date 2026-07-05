@@ -1,24 +1,25 @@
 # CSV Search Telegram Bot
 
 A Telegram bot that loads a CSV file you send it, then lets you search across
-every column just by typing a word or phrase.
+every column just by typing a word or phrase — with a polished, card-style
+interface.
 
 ## How it works
 
 1. Send the bot a `.csv` file.
 2. It parses the file with pandas and keeps it in memory, per chat.
 3. Send any text message — the bot searches all columns (case-insensitive,
-   substring match) and replies with matching rows.
-4. Send a new CSV any time to replace the loaded one.
+   substring match), shows an exact match first if there is one, and replies
+   with nicely formatted result cards.
+4. If there are more matches than fit on one page, use the
+   **◀️ Previous / Next ▶️** buttons under the message to page through them.
+5. Send a new CSV any time to replace the loaded one.
 
-Commands:
+Commands (also available via Telegram's `/` command menu):
 - `/start` or `/help` — usage info
-- `/status` — shows which file is loaded and its size
-- `/columns` — lists the column names
-- `/clear` — forgets the currently loaded file
-
-If a search returns more matches than fit in one message, the reply includes
-**Next ▶️ / ◀️ Previous** buttons so you can page through all the results.
+- `/status` — shows the loaded file, row/column counts, and how long ago it was loaded
+- `/columns` — lists all available fields
+- `/clear` — unloads the current file and clears any active search
 
 ## Setup
 
@@ -50,7 +51,7 @@ just run it and message your bot on Telegram.
 | Variable            | Default | Description                                  |
 |---------------------|---------|-----------------------------------------------|
 | `TELEGRAM_BOT_TOKEN`| —       | Required. Your bot token from BotFather.      |
-| `MAX_RESULTS`       | 20      | Max rows shown per search reply.              |
+| `MAX_RESULTS`       | 10      | Rows shown per page of search results.        |
 | `MAX_FILE_SIZE_MB`  | 20      | Max CSV size accepted.                        |
 | `ALLOWED_USER_IDS`  | (none)  | Comma-separated Telegram user IDs allowed to use the bot. Leave empty to allow anyone. |
 
@@ -62,7 +63,19 @@ just run it and message your bot on Telegram.
    export ALLOWED_USER_IDS="123456789"
    ```
    For multiple people, separate with commas: `"123456789,987654321"`.
-3. Restart the bot. Anyone not on the list gets "Sorry, you're not authorized to use this bot." for every command and message.
+3. Restart the bot. Anyone not on the list gets an "Access denied" message for every command and message.
+
+## Interface notes
+
+- Messages use Telegram's HTML formatting (bold labels, monospace values,
+  divider lines) for a cleaner, more "dashboard"-like look than plain text.
+- All user-provided and CSV-cell text is HTML-escaped before being sent, so a
+  cell containing `<`, `>`, or `&` won't break formatting or get interpreted
+  as markup.
+- The bot shows a "typing…" indicator while parsing an upload or running a
+  search, so it doesn't feel unresponsive on larger files.
+- The command menu (the `/` button in Telegram's chat UI) is registered
+  automatically on startup — no need to configure it manually via BotFather.
 
 ## Notes / limitations
 
@@ -70,10 +83,8 @@ just run it and message your bot on Telegram.
   all loaded CSVs. For persistence across restarts, you'd want to save the
   DataFrame to disk (e.g. as a pickle or parquet file) keyed by chat ID.
 - Search is a simple substring match across all columns (not a fuzzy search
-  or query language). Let me know if you want fuzzy matching, exact-column
-  filters (e.g. `column:value`), or pagination through results — those are
-  straightforward to add.
+  or query language).
 - One CSV is kept per chat, not per user — if the bot is in a group, group
   members share the same loaded file.
 - Telegram bot messages are capped at 4096 characters, so very large result
-  sets are truncated; adjust `MAX_RESULTS` if needed.
+  sets are paginated rather than shown all at once.
