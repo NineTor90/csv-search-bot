@@ -49,6 +49,17 @@ just run it and message your bot on Telegram.
 | `TELEGRAM_BOT_TOKEN`| —       | Required. Your bot token from BotFather.      |
 | `MAX_RESULTS`       | 20      | Max rows shown per search reply.              |
 | `MAX_FILE_SIZE_MB`  | 20      | Max CSV size accepted.                        |
+| `ALLOWED_USER_IDS`  | (none)  | Comma-separated Telegram user IDs allowed to use the bot. Leave empty to allow anyone. |
+
+### Restricting the bot to one person
+
+1. Find your Telegram numeric user ID — message [@userinfobot](https://t.me/userinfobot) and it'll reply with your ID.
+2. Set the environment variable:
+   ```bash
+   export ALLOWED_USER_IDS="123456789"
+   ```
+   For multiple people, separate with commas: `"123456789,987654321"`.
+3. Restart the bot. Anyone not on the list gets "Sorry, you're not authorized to use this bot." for every command and message.
 
 ## Notes / limitations
 
